@@ -30,21 +30,16 @@ class AppDatabase:
     @staticmethod
     def initialize(force_recreate=False):
         """Initialize all database tables."""
-        # Ensure DB directory exists
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Check if tables already exist
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
         table_exists = cursor.fetchone() is not None
         
-        # Only recreate tables if they don't exist or if forced
         if force_recreate or not table_exists:
             print("Creating database tables...")
-            
-            # Create tables without dropping existing ones
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,10 +141,8 @@ class AppDatabase:
     
     @staticmethod
     def signup(username, password_hash, email=None):
-        # Fix: Make sure empty email is stored as NULL, not as empty string
         if email == "":
             email = None
-            
         conn = get_db_connection()
         cursor = conn.cursor()
         try:
@@ -191,8 +184,10 @@ class AppDatabase:
                           (user_id, project_name, description))
             project_id = cursor.lastrowid
             conn.commit()
+            print(f"Project '{project_name}' created successfully for user_id {user_id}")
             return project_id
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as e:
+            print(f"Project creation failed for '{project_name}': {e}")
             return None
         finally:
             conn.close()
@@ -213,4 +208,60 @@ class AppDatabase:
         cursor.execute("SELECT username, email FROM users")
         users = cursor.fetchall()
         conn.close()
+        print(f"Listing users: {[(user['username'], user['email']) for user in users]}")
         return [(user["username"], user["email"]) for user in users]
+    
+    # New methods for call management
+    @staticmethod
+    def store_call(project_id, call_id, transcript):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT OR REPLACE INTO calls (call_id, project_id, transcript) VALUES (?, ?, ?)",
+                          (call_id, project_id, transcript))
+            conn.commit()
+            print(f"Call '{call_id}' stored successfully for project_id {project_id}")
+            return True
+        except sqlite3.IntegrityError as e:
+            print(f"Failed to store call '{call_id}': {e}")
+            return False
+        finally:
+            conn.close()
+    
+    @staticmethod
+    def get_call(project_id, call_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT call_id, transcript, timestamp FROM calls WHERE project_id = ? AND call_id = ?",
+                      (project_id, call_id))
+        call = cursor.fetchone()
+        conn.close()
+        return call
+    
+    @staticmethod
+    def get_project_calls(project_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT call_id, transcript, timestamp FROM calls WHERE project_id = ?", (project_id,))
+        calls = cursor.fetchall()
+        conn.close()
+        return calls
+    
+    @staticmethod
+    def remove_call(project_id, call_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM calls WHERE project_id = ? AND call_id = ?", (project_id, call_id))
+            if cursor.rowcount > 0:
+                conn.commit()
+                print(f"Call '{call_id}' removed successfully from project_id {project_id}")
+                return True
+            else:
+                print(f"Call '{call_id}' not found in project_id {project_id}")
+                return False
+        except Exception as e:
+            print(f"Failed to remove call '{call_id}': {e}")
+            return False
+        finally:
+            conn.close()
