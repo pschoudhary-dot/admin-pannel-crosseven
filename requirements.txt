@@ -1,0 +1,10 @@
+streamlit
+retell-sdk
+pandas
+requests
+openai
+langfuse
+google-generativeai
+langchain
+python-dotenv
+passlib
