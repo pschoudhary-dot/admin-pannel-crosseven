@@ -115,4 +115,3 @@ else:
 # Sidebar navigation when a project is selected
 if "project_id" in st.session_state:
     st.sidebar.write(f"Current Project: {st.session_state.project_name} (ID: {st.session_state.project_id})")
-    st.sidebar.write("Navigate to other pages:")
