@@ -239,7 +239,8 @@ with tab1:
             answer = st.text_area("Answer", key="manual_answer")
             call_id = st.text_input("Associated Call ID (optional)", key="manual_call_id")
             submit_button = st.form_submit_button(label="Save QA Pair")
-        
+            
+        # Process form submission outside the form
         if submit_button:
             # Debug output
             st.write("DEBUG: Save QA Pair button clicked")
@@ -248,11 +249,11 @@ with tab1:
             if not question or not answer:
                 st.error("Question and Answer are required.")
             else:
-                # Normalize inputs
                 question = question.strip()
                 answer = answer.strip()
                 call_id = call_id.strip() if call_id else None
-                
+                if call_id:
+                    call_id = None
                 # Ensure project_id is an integer
                 try:
                     project_id = int(project_id)
@@ -279,8 +280,7 @@ with tab1:
                             store_success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
                             if store_success:
                                 st.success("QA pair updated successfully!")
-                                st.form_submit_button("Clear Form", on_click=lambda: st.session_state.clear())  # Clear form on next run
-                                st.rerun()
+                                #st.rerun()
                             else:
                                 st.error("Failed to store updated QA pair.")
                         else:
@@ -291,12 +291,11 @@ with tab1:
                         store_success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
                         if store_success:
                             st.success("New QA pair saved successfully!")
-                            st.form_submit_button("Clear Form", on_click=lambda: st.session_state.clear())  # Clear form on next run
-                            st.rerun()
+                            #st.rerun()
                         else:
                             st.error("Failed to save new QA pair.")
                     
-                    else:  # Skip
+                    else: 
                         st.info("QA pair not saved (skipped due to duplicate).")
                 
                 else:
@@ -304,8 +303,7 @@ with tab1:
                     store_success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
                     if store_success:
                         st.success("QA pair saved successfully!")
-                        st.form_submit_button("Clear Form", on_click=lambda: st.session_state.clear())  # Clear form on next run
-                        st.rerun()
+                        #st.rerun()
                     else:
                         st.error("Failed to save QA pair. Check database logs.")
     
@@ -754,6 +752,7 @@ with tab2:
             columns = df.columns.tolist()
             question_col = st.selectbox("Select Question Column", columns, key="question_col")
             answer_col = st.selectbox("Select Answer Column", columns, key="answer_col")
+            call_id_col = st.session_state.get("import_call_id_col")
             
             # Optional call_id column
             has_call_id = st.checkbox("File includes Call ID column", value=False)
