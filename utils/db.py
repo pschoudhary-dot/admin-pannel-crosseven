@@ -4,9 +4,10 @@ import os
 DB_PATH = "DB/retell.db"
 
 def get_db_connection():
-    """Return a database connection."""
+    """Return a database connection with foreign keys enabled."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 class AppDatabase:
@@ -193,6 +194,121 @@ class AppDatabase:
             conn.close()
     
     @staticmethod
+    def check_database_connection():
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA foreign_keys")
+            fk_status = cursor.fetchone()[0]
+            cursor.execute("SELECT sqlite_version()")
+            version = cursor.fetchone()[0]
+            cursor.execute("PRAGMA database_list")
+            db_info = cursor.fetchall()
+            conn.close()
+            return True, {
+                "SQLite Version": version,
+                "Foreign Keys Enabled": bool(fk_status),
+                "Database Path": db_info[0]['file'] if db_info else "Unknown"
+            }
+        except Exception as e:
+            return False, f"Database connection error: {str(e)}"
+
+    @staticmethod
+    def store_qa_pair(project_id, question, answer, call_id=None):
+        print(f"Attempting to store QA pair - Project ID: {project_id}, Call ID: {call_id}")
+        print(f"Question: {question[:50]}...")
+        print(f"Answer: {answer[:50]}...")
+        
+        if not question or not answer or not project_id:
+            print("Missing required data for QA pair")
+            return False
+
+        # Normalize data
+        try:
+            project_id = int(project_id)
+        except (ValueError, TypeError):
+            print(f"Invalid project_id format: {project_id}")
+            return False
+            
+        # Empty string call_id should be converted to None
+        if call_id == "":
+            call_id = None
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Check foreign keys status
+        cursor.execute("PRAGMA foreign_keys")
+        fk_status = cursor.fetchone()[0]
+        print(f"Foreign keys status: {'ON' if fk_status else 'OFF'}")
+        
+        try:
+            # Validate project_id exists
+            cursor.execute("SELECT project_id FROM projects WHERE project_id = ?", (project_id,))
+            project = cursor.fetchone()
+            if not project:
+                print(f"Project ID {project_id} does not exist")
+                conn.close()
+                return False
+            else:
+                print(f"Project ID {project_id} validated successfully")
+
+            # Validate call_id if provided - if not found, set to NULL to avoid FK constraint
+            if call_id:
+                cursor.execute("SELECT call_id FROM calls WHERE call_id = ? AND project_id = ?", (call_id, project_id))
+                call = cursor.fetchone()
+                if not call:
+                    print(f"Warning: Call ID {call_id} does not exist for project {project_id}")
+                    print("Setting call_id to NULL to avoid foreign key constraint failure")
+                    call_id = None
+
+            # Try without call_id first if provided and fails FK check
+            try:
+                print("About to execute INSERT statement")
+                if call_id is None:
+                    print("Executing with NULL call_id")
+                    cursor.execute("""
+                    INSERT INTO qa_pairs (project_id, call_id, question, answer) 
+                    VALUES (?, NULL, ?, ?)
+                    """, (project_id, question.strip(), answer.strip()))
+                else:
+                    print(f"Executing with call_id: {call_id}")
+                    cursor.execute("""
+                    INSERT INTO qa_pairs (project_id, call_id, question, answer) 
+                    VALUES (?, ?, ?, ?)
+                    """, (project_id, call_id, question.strip(), answer.strip()))
+                
+                print("About to commit transaction")
+                conn.commit()
+                print(f"QA pair stored successfully for project_id {project_id}, call_id {call_id}")
+                return True
+            except sqlite3.IntegrityError as e:
+                # If fails with call_id, try without it
+                if call_id is not None:
+                    print(f"Insert failed with call_id, trying without: {str(e)}")
+                    cursor.execute("""
+                    INSERT INTO qa_pairs (project_id, call_id, question, answer) 
+                    VALUES (?, NULL, ?, ?)
+                    """, (project_id, question.strip(), answer.strip()))
+                    conn.commit()
+                    print("QA pair stored successfully without call_id reference")
+                    return True
+                else:
+                    raise e
+                    
+        except sqlite3.IntegrityError as e:
+            print(f"Failed to store QA pair due to IntegrityError: {e}")
+            conn.rollback()
+            return False
+        except Exception as e:
+            print(f"Unexpected error storing QA pair: {str(e)}")
+            print(f"Error type: {type(e).__name__}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    @staticmethod
     def get_username(user_id):
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -211,7 +327,6 @@ class AppDatabase:
         print(f"Listing users: {[(user['username'], user['email']) for user in users]}")
         return [(user["username"], user["email"]) for user in users]
     
-    # New methods for call management
     @staticmethod
     def store_call(project_id, call_id, transcript):
         conn = get_db_connection()
@@ -262,6 +377,51 @@ class AppDatabase:
                 return False
         except Exception as e:
             print(f"Failed to remove call '{call_id}': {e}")
+            return False
+        finally:
+            conn.close()
+    
+    @staticmethod
+    def store_document(project_id, file_name, file_path, file_type):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO documents (project_id, file_name, file_path, file_type) VALUES (?, ?, ?, ?)",
+                          (project_id, file_name, file_path, file_type))
+            conn.commit()
+            print(f"Document '{file_name}' stored for project_id {project_id}")
+            return True
+        except sqlite3.IntegrityError as e:
+            print(f"Failed to store document '{file_name}': {e}")
+            return False
+        finally:
+            conn.close()
+    
+    @staticmethod
+    def get_project_qa_pairs(project_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, call_id, question, answer, created_at FROM qa_pairs WHERE project_id = ?",
+                      (project_id,))
+        qa_pairs = cursor.fetchall()
+        conn.close()
+        return qa_pairs
+    
+    @staticmethod
+    def remove_qa_pair(project_id, qa_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM qa_pairs WHERE project_id = ? AND id = ?", (project_id, qa_id))
+            if cursor.rowcount > 0:
+                conn.commit()
+                print(f"QA pair {qa_id} removed from project_id {project_id}")
+                return True
+            else:
+                print(f"QA pair {qa_id} not found in project_id {project_id}")
+                return False
+        except Exception as e:
+            print(f"Failed to remove QA pair {qa_id}: {e}")
             return False
         finally:
             conn.close()

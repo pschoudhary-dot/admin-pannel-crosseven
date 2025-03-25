@@ -8,3 +8,6 @@ google-generativeai
 langchain
 python-dotenv
 passlib
+langchain-text-splitters
+tqdm
+openpyxl

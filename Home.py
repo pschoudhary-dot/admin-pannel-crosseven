@@ -4,19 +4,15 @@ from utils.auth import signup, signin
 from utils.db import AppDatabase
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Initialize database (with option to clear via query param)
 query_params = st.query_params
 clear_db = query_params.get("clear_db", "false").lower() == "true"
 initialize_database(clear=clear_db)
 
-# Initialize session state variables if they don't exist
 if "form_submitted" not in st.session_state:
     st.session_state.form_submitted = False
 
-# Streamlit app
 if "user_id" not in st.session_state:
     st.title("Admin Panel")
     tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
@@ -99,11 +95,9 @@ else:
             else:
                 st.error(f"Unable to create project: '{new_project_name}' already exists for this user. Please choose a different name.")
     
-    # Display success message and guide user to select the newly created project
     if st.session_state.get("show_project_success", False):
         st.success(f"Project '{st.session_state.created_project_name}' created successfully!")
         st.info("Please select your new project from the dropdown above and click 'Select Project' to start working with it.")
-        # Clear the flag after showing the message
         st.session_state.show_project_success = False
     
     if st.button("Sign Out"):
@@ -112,6 +106,5 @@ else:
         st.success("Signed out successfully!")
         st.rerun()
 
-# Sidebar navigation when a project is selected
 if "project_id" in st.session_state:
     st.sidebar.write(f"Current Project: {st.session_state.project_name} (ID: {st.session_state.project_id})")

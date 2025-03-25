@@ -27,10 +27,9 @@ project_id = st.session_state.project_id
 project_name = st.session_state.project_name
 st.write(f"Working on Project: {project_name} (ID: {project_id})")
 
-# Sidebar navigation
 st.sidebar.write(f"Current Project: {project_name} (ID: {project_id})")
 
-# Tabs for Fetching and Viewing Calls
+# Tabs
 tab1, tab2, tab3, tab4 = st.tabs(["Fetch New Calls", "View Stored Calls", "Import Calls", "Export Calls"])
 
 # Tab 1: Fetch New Calls from Retell SDK
@@ -100,6 +99,7 @@ with tab1:
             else:
                 st.error(f"Failed to store Call '{st.session_state.fetched_call['call_id']}'. It may already exist.")
     
+
     elif "fetched_calls" in st.session_state:
         st.subheader("Fetched Calls")
         selected_calls = st.multiselect("Select Calls to Store", 
@@ -124,9 +124,17 @@ with tab1:
     
     # Display fetched calls for review
     if "fetched_calls" in st.session_state:
+        st.markdown("### Fetched Calls Preview")
+        st.info("Review the complete transcripts below. Use the expanders to read through the entire content of each call.")
         for call in st.session_state.fetched_calls:
             with st.expander(f"Call ID: {call['call_id']}"):
-                st.text_area("Transcript", call["transcript"], height=150, key=f"transcript_{call['call_id']}")
+                st.text_area(
+                    "Complete Transcript",
+                    call["transcript"],
+                    height=300,
+                    key=f"transcript_{call['call_id']}",
+                    help="Scroll to read the complete transcript"
+                )
 
 # Tab 2: View and Manage Stored Calls
 with tab2:
@@ -143,9 +151,19 @@ with tab2:
             call = AppDatabase.get_call(project_id, call_id_to_view)
             if call:
                 st.subheader(f"Call ID: {call['call_id']}")
-                st.text_area("Stored Transcript", call["transcript"], height=200, key="stored_transcript")
+                # Enhanced transcript display with better formatting and scrolling
+                st.markdown("### Transcript Preview")
+                st.info("Review the complete transcript below. Use the scroll bar to read through the entire content.")
+                st.text_area(
+                    "Complete Transcript",
+                    call["transcript"],
+                    height=400,  # Increased height for better visibility
+                    key="stored_transcript",
+                    help="Scroll to read the complete transcript"
+                )
                 st.write(f"Stored on: {call['timestamp']}")
                 
+                # Action buttons in columns for better organization
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Remove Call", key=f"remove_{call['call_id']}"):
@@ -192,13 +210,26 @@ with tab3:
             
             # Preview data
             st.subheader("Preview Data")
-            st.info("Review the data below. You can uncheck the 'Import' checkbox for any calls you don't want to import.")
+            st.info("Review the data below. You can verify the complete transcript for each call before importing. Use the checkboxes to select which calls to import.")
             preview_df = df[[call_id_col, transcript_col]].copy()
             preview_df.columns = ["Call ID", "Transcript"]
             
-            # Add selection column
+            # Add selection column and display with full transcript visibility
             preview_df.insert(0, "Import", True)
-            edited_df = st.data_editor(preview_df, hide_index=True)
+            edited_df = st.data_editor(
+                preview_df,
+                hide_index=True,
+                column_config={
+                    "Import": st.column_config.CheckboxColumn("Select for Import"),
+                    "Call ID": st.column_config.TextColumn("Call ID", width="medium"),
+                    "Transcript": st.column_config.TextColumn(
+                        "Transcript",
+                        width="large",
+                        help="Full transcript text - scroll to read more"
+                    )
+                },
+                use_container_width=True
+            )
             
             # Import selected calls
             if st.button("Import Selected Calls"):
