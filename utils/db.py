@@ -30,17 +30,20 @@ class AppDatabase:
     
     @staticmethod
     def initialize(force_recreate=False):
-        """Initialize all database tables."""
+        """Initialize all database tables according to the new schema."""
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         
         conn = get_db_connection()
         cursor = conn.cursor()
         
+        # Check if the database already has tables
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
         table_exists = cursor.fetchone() is not None
         
         if force_recreate or not table_exists:
             print("Creating database tables...")
+            
+            # Users table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +53,8 @@ class AppDatabase:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
-            
+
+            # Projects table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS projects (
                 project_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,11 +62,12 @@ class AppDatabase:
                 project_name TEXT NOT NULL,
                 description TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users (user_id),
-                UNIQUE(user_id, project_name)
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                UNIQUE (user_id, project_name)
             )
             ''')
-            
+
+            # Documents table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS documents (
                 document_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,20 +76,22 @@ class AppDatabase:
                 file_path TEXT NOT NULL,
                 file_type TEXT,
                 uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects (project_id)
+                FOREIGN KEY (project_id) REFERENCES projects(project_id)
             )
             ''')
-            
+
+            # Calls table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS calls (
                 call_id TEXT PRIMARY KEY,
                 project_id INTEGER NOT NULL,
                 transcript TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects (project_id)
+                FOREIGN KEY (project_id) REFERENCES projects(project_id)
             )
             ''')
-            
+
+            # Utterances table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS utterances (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,11 +100,12 @@ class AppDatabase:
                 role TEXT,
                 content TEXT,
                 utterance_index INTEGER,
-                FOREIGN KEY (call_id) REFERENCES calls (call_id),
-                FOREIGN KEY (project_id) REFERENCES projects (project_id)
+                FOREIGN KEY (call_id) REFERENCES calls(call_id),
+                FOREIGN KEY (project_id) REFERENCES projects(project_id)
             )
             ''')
-            
+
+            # QA Pairs table (main table)
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS qa_pairs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,11 +114,32 @@ class AppDatabase:
                 question TEXT,
                 answer TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (call_id) REFERENCES calls (call_id),
-                FOREIGN KEY (project_id) REFERENCES projects (project_id)
+                FOREIGN KEY (project_id) REFERENCES projects(project_id),
+                FOREIGN KEY (call_id) REFERENCES calls(call_id)
             )
             ''')
-            
+
+            # QA Temp table (temporary storage of generated QA pairs)
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS qa_temp (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id TEXT,
+                is_trained BOOLEAN DEFAULT 0,
+                is_reviewed BOOLEAN DEFAULT 0,
+                similarity_score REAL,
+                similar_qa_id INTEGER,
+                metadata TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(project_id),
+                FOREIGN KEY (similar_qa_id) REFERENCES qa_pairs(id)
+            )
+            ''')
+
+            # Datasets table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS datasets (
                 dataset_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,11 +148,35 @@ class AppDatabase:
                 file_path TEXT NOT NULL,
                 source_type TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects (project_id)
+                FOREIGN KEY (project_id) REFERENCES projects(project_id)
             )
             ''')
-            
-            print("All database tables initialized successfully")
+
+            # Models table (tracks models trained on datasets)
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS models (
+                model_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                dataset_id INTEGER NOT NULL,
+                model_name TEXT NOT NULL,
+                model_path TEXT NOT NULL,
+                model_type TEXT NOT NULL,
+                version TEXT,
+                qa_temp_ids TEXT,
+                trained_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(project_id),
+                FOREIGN KEY (dataset_id) REFERENCES datasets(dataset_id)
+            )
+            ''')
+
+            # Indices for faster lookups
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_qa_temp_project ON qa_temp(project_id)''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_qa_temp_source ON qa_temp(source_type, source_id)''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_qa_temp_trained ON qa_temp(is_trained)''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_models_project ON models(project_id)''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_models_dataset ON models(dataset_id)''')
+
+            print("All database tables and indices initialized successfully")
         else:
             print("Tables already exist, skipping initialization")
         
@@ -230,72 +283,50 @@ class AppDatabase:
             print(f"Invalid project_id format: {project_id}")
             return False
             
-        # Empty string call_id should be converted to None
         if call_id == "":
             call_id = None
 
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Check foreign keys status
         cursor.execute("PRAGMA foreign_keys")
         fk_status = cursor.fetchone()[0]
         print(f"Foreign keys status: {'ON' if fk_status else 'OFF'}")
         
         try:
-            # Validate project_id exists
             cursor.execute("SELECT project_id FROM projects WHERE project_id = ?", (project_id,))
             project = cursor.fetchone()
             if not project:
                 print(f"Project ID {project_id} does not exist")
-                conn.close()
                 return False
-            else:
-                print(f"Project ID {project_id} validated successfully")
+            print(f"Project ID {project_id} validated successfully")
 
-            # Validate call_id if provided - if not found, set to NULL to avoid FK constraint
             if call_id:
                 cursor.execute("SELECT call_id FROM calls WHERE call_id = ? AND project_id = ?", (call_id, project_id))
                 call = cursor.fetchone()
                 if not call:
                     print(f"Warning: Call ID {call_id} does not exist for project {project_id}")
-                    print("Setting call_id to NULL to avoid foreign key constraint failure")
                     call_id = None
 
-            # Try without call_id first if provided and fails FK check
-            try:
-                print("About to execute INSERT statement")
-                if call_id is None:
-                    print("Executing with NULL call_id")
-                    cursor.execute("""
-                    INSERT INTO qa_pairs (project_id, call_id, question, answer) 
-                    VALUES (?, NULL, ?, ?)
-                    """, (project_id, question.strip(), answer.strip()))
-                else:
-                    print(f"Executing with call_id: {call_id}")
-                    cursor.execute("""
-                    INSERT INTO qa_pairs (project_id, call_id, question, answer) 
-                    VALUES (?, ?, ?, ?)
-                    """, (project_id, call_id, question.strip(), answer.strip()))
+            print("About to execute INSERT statement")
+            if call_id is None:
+                print("Executing with NULL call_id")
+                cursor.execute("""
+                INSERT INTO qa_pairs (project_id, call_id, question, answer) 
+                VALUES (?, NULL, ?, ?)
+                """, (project_id, question.strip(), answer.strip()))
+            else:
+                print(f"Executing with call_id: {call_id}")
+                cursor.execute("""
+                INSERT INTO qa_pairs (project_id, call_id, question, answer) 
+                VALUES (?, ?, ?, ?)
+                """, (project_id, call_id, question.strip(), answer.strip()))
                 
-                print("About to commit transaction")
-                conn.commit()
-                print(f"QA pair stored successfully for project_id {project_id}, call_id {call_id}")
-                return True
-            except sqlite3.IntegrityError as e:
-                # If fails with call_id, try without it
-                if call_id is not None:
-                    print(f"Insert failed with call_id, trying without: {str(e)}")
-                    cursor.execute("""
-                    INSERT INTO qa_pairs (project_id, call_id, question, answer) 
-                    VALUES (?, NULL, ?, ?)
-                    """, (project_id, question.strip(), answer.strip()))
-                    conn.commit()
-                    print("QA pair stored successfully without call_id reference")
-                    return True
-                else:
-                    raise e
-                    
+            print("About to commit transaction")
+            conn.commit()
+            print(f"QA pair stored successfully for project_id {project_id}, call_id {call_id}")
+            return True
+            
         except sqlite3.IntegrityError as e:
             print(f"Failed to store QA pair due to IntegrityError: {e}")
             conn.rollback()
@@ -307,6 +338,125 @@ class AppDatabase:
             return False
         finally:
             conn.close()
+
+    @staticmethod
+    def store_qa_temp(project_id, question, answer, source_type, source_id=None, metadata=None):
+        """Store a QA pair in the qa_temp table."""
+        if not project_id or not question or not answer or not source_type:
+            print("Missing required data for QA temp pair")
+            return False
+
+        try:
+            project_id = int(project_id)
+        except (ValueError, TypeError):
+            print(f"Invalid project_id format: {project_id}")
+            return False
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("SELECT project_id FROM projects WHERE project_id = ?", (project_id,))
+            project = cursor.fetchone()
+            if not project:
+                print(f"Project ID {project_id} does not exist")
+                return False
+
+            cursor.execute("""
+            INSERT INTO qa_temp (project_id, question, answer, source_type, source_id, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """, (project_id, question.strip(), answer.strip(), source_type, source_id, metadata))
+            
+            conn.commit()
+            print(f"QA temp pair stored successfully for project_id {project_id}")
+            return True
+
+        except sqlite3.IntegrityError as e:
+            print(f"Failed to store QA temp pair due to IntegrityError: {e}")
+            conn.rollback()
+            return False
+        except Exception as e:
+            print(f"Unexpected error storing QA temp pair: {str(e)}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_project_qa_temp(project_id):
+        """Retrieve all QA pairs from qa_temp for a project."""
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+        SELECT id, question, answer, source_type, source_id, is_trained, is_reviewed, 
+               similarity_score, similar_qa_id, metadata, created_at 
+        FROM qa_temp WHERE project_id = ?
+        """, (project_id,))
+        qa_temp_pairs = cursor.fetchall()
+        conn.close()
+        return qa_temp_pairs
+
+    @staticmethod
+    def store_model(project_id, dataset_id, model_name, model_path, model_type, version=None, qa_temp_ids=None):
+        """Store a trained model in the models table."""
+        if not project_id or not dataset_id or not model_name or not model_path or not model_type:
+            print("Missing required data for model")
+            return False
+
+        try:
+            project_id = int(project_id)
+            dataset_id = int(dataset_id)
+        except (ValueError, TypeError):
+            print(f"Invalid project_id or dataset_id format: {project_id}, {dataset_id}")
+            return False
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("SELECT project_id FROM projects WHERE project_id = ?", (project_id,))
+            if not cursor.fetchone():
+                print(f"Project ID {project_id} does not exist")
+                return False
+
+            cursor.execute("SELECT dataset_id FROM datasets WHERE dataset_id = ? AND project_id = ?", 
+                          (dataset_id, project_id))
+            if not cursor.fetchone():
+                print(f"Dataset ID {dataset_id} does not exist for project {project_id}")
+                return False
+
+            cursor.execute("""
+            INSERT INTO models (project_id, dataset_id, model_name, model_path, model_type, version, qa_temp_ids)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (project_id, dataset_id, model_name, model_path, model_type, version, qa_temp_ids))
+            
+            conn.commit()
+            print(f"Model '{model_name}' stored successfully for project_id {project_id}")
+            return True
+
+        except sqlite3.IntegrityError as e:
+            print(f"Failed to store model due to IntegrityError: {e}")
+            conn.rollback()
+            return False
+        except Exception as e:
+            print(f"Unexpected error storing model: {str(e)}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_project_models(project_id):
+        """Retrieve all models for a project."""
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+        SELECT model_id, dataset_id, model_name, model_path, model_type, version, qa_temp_ids, trained_at
+        FROM models WHERE project_id = ?
+        """, (project_id,))
+        models = cursor.fetchall()
+        conn.close()
+        return models
 
     @staticmethod
     def get_username(user_id):
