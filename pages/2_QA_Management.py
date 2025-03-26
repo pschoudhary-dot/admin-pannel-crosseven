@@ -1,6 +1,7 @@
 import streamlit as st
 from utils.db import AppDatabase
 from utils.file_utils import save_uploaded_file
+from utils.qa_utils import preprocess_text, generate_qa_from_transcript, extract_md_sections, generate_qa_from_md_section, check_duplicate_qa
 from dotenv import load_dotenv
 import os
 import pandas as pd
@@ -9,9 +10,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 import io
 import json
 import re
-from pathlib import Path
 import time
-from tqdm import tqdm
 
 # Load environment variables
 load_dotenv()
@@ -21,8 +20,9 @@ gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
     st.error("GEMINI_API_KEY not found in environment variables. Please set it in your .env file.")
     st.stop()
+
 genai.configure(api_key=gemini_api_key)
-gemini_model = genai.GenerativeModel('gemini-2.0-pro-exp-02-05')  # Using a more recent Gemini model gemini1.5-flash
+gemini_model = genai.GenerativeModel('gemini-2.0-pro-exp-02-05')  # gemini-1.5-flash
 
 st.title("QA Management")
 
@@ -252,7 +252,8 @@ with tab1:
                 question = question.strip()
                 answer = answer.strip()
                 call_id = call_id.strip() if call_id else None
-                if call_id:
+                # Empty string should be treated as None
+                if call_id == "":
                     call_id = None
                 # Ensure project_id is an integer
                 try:
@@ -280,7 +281,8 @@ with tab1:
                             store_success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
                             if store_success:
                                 st.success("QA pair updated successfully!")
-                                #st.rerun()
+                                time.sleep(1)  # Give user time to see the success message
+                                st.rerun()
                             else:
                                 st.error("Failed to store updated QA pair.")
                         else:
@@ -291,7 +293,8 @@ with tab1:
                         store_success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
                         if store_success:
                             st.success("New QA pair saved successfully!")
-                            #st.rerun()
+                            time.sleep(1)  # Give user time to see the success message
+                            st.rerun()
                         else:
                             st.error("Failed to save new QA pair.")
                     
@@ -303,9 +306,11 @@ with tab1:
                     store_success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
                     if store_success:
                         st.success("QA pair saved successfully!")
-                        #st.rerun()
+                        time.sleep(1)  # Give user time to see the success message
+                        st.rerun()
                     else:
                         st.error("Failed to save QA pair. Check database logs.")
+                        st.write(f"DEBUG: Error details - Project ID: {project_id}, Question: {question[:30]}..., Answer: {answer[:30]}..., Call ID: {call_id}")
     
     # Generate from call transcripts
     elif gen_options == "Call Transcripts":
@@ -412,7 +417,7 @@ with tab1:
                         for i, call_id in enumerate(selected_calls):
                             call = AppDatabase.get_call(project_id, call_id)
                             if call and call["transcript"]:
-                                qa_pairs = generate_qa_from_transcript(call["transcript"], call_id)
+                                qa_pairs = generate_qa_from_transcript(call["transcript"], call_id, gemini_model)
                                 if qa_pairs:
                                     all_qa_pairs.extend(qa_pairs)
                             
@@ -527,7 +532,7 @@ with tab1:
                         
                         for i, call in enumerate(calls_to_process):
                             if call and call["transcript"]:
-                                qa_pairs = generate_qa_from_transcript(call["transcript"], call["call_id"])
+                                qa_pairs = generate_qa_from_transcript(call["transcript"], call["call_id"], gemini_model)
                                 if qa_pairs:
                                     all_qa_pairs.extend(qa_pairs)
                             
@@ -627,7 +632,7 @@ with tab1:
                             progress_bar = st.progress(0)
                             
                             for i, chunk in enumerate(chunks):
-                                qa_chunk = generate_qa_from_transcript(chunk, None)
+                                qa_chunk = generate_qa_from_transcript(chunk, None, gemini_model)
                                 all_qa_pairs.extend(qa_chunk)
                                 progress_bar.progress((i + 1) / len(chunks))
                                 time.sleep(0.5)  # To avoid rate limiting
@@ -638,7 +643,7 @@ with tab1:
                             progress_bar = st.progress(0)
                             
                             for i, section in enumerate(sections):
-                                qa_pairs = generate_qa_from_md_section(section)
+                                qa_pairs = generate_qa_from_md_section(section, gemini_model)
                                 all_qa_pairs.extend(qa_pairs)
                                 progress_bar.progress((i + 1) / len(sections))
                                 time.sleep(0.5)  # To avoid rate limiting
@@ -814,57 +819,69 @@ with tab2:
                     else:
                         duplicate_action = "Skip duplicates"  # Default, but won't matter
                     
-                    if st.button("Confirm Import"):
-                        saved_count = 0
-                        updated_count = 0
-                        skipped_count = 0
-                        error_count = 0
-                        
-                        for _, row in selected_rows.iterrows():
-                            question = row["Question"]
-                            answer = row["Answer"]
-                            call_id = row.get("Call ID", None)
+                    confirm_import = st.button("Confirm Import")
+                    if confirm_import:
+                        with st.spinner("Importing QA pairs, please wait..."):
+                            saved_count = 0
+                            updated_count = 0
+                            skipped_count = 0
+                            error_count = 0
                             
-                            # Skip empty questions or answers
-                            if not question or not answer or pd.isna(question) or pd.isna(answer):
-                                error_count += 1
-                                continue
-                            
-                            # Clean up call_id
-                            if call_id and (pd.isna(call_id) or call_id.lower() == 'nan' or call_id.strip() == ''):
-                                call_id = None
-                            
-                            # Check for duplicates
-                            duplicate = check_duplicate_qa(project_id, question, existing_qa_pairs)
-                            
-                            if duplicate:
-                                if duplicate_action == "Skip duplicates":
-                                    skipped_count += 1
+                            for _, row in selected_rows.iterrows():
+                                question = row["Question"]
+                                answer = row["Answer"]
+                                call_id = row.get("Call ID", None)
+                                
+                                # Skip empty questions or answers
+                                if not question or not answer or pd.isna(question) or pd.isna(answer):
+                                    error_count += 1
                                     continue
-                                elif duplicate_action == "Override existing":
-                                    AppDatabase.remove_qa_pair(project_id, duplicate['id'])
-                                    success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
-                                    if success:
-                                        st.success("QA pair updated successfully!")
-                                        updated_count += 1
+                                
+                                # Clean up call_id
+                                if call_id and (pd.isna(call_id) or call_id.lower() == 'nan' or call_id.strip() == ''):
+                                    call_id = None
+                                
+                                # Check for duplicates
+                                duplicate = check_duplicate_qa(project_id, question, existing_qa_pairs)
+                                
+                                try:
+                                    if duplicate:
+                                        if duplicate_action == "Skip duplicates":
+                                            skipped_count += 1
+                                            continue
+                                        elif duplicate_action == "Override existing":
+                                            remove_success = AppDatabase.remove_qa_pair(project_id, duplicate['id'])
+                                            if not remove_success:
+                                                st.error(f"Failed to remove existing QA pair: '{question[:50]}...'")
+                                                error_count += 1
+                                                continue
+                                                
+                                            success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
+                                            if success:
+                                                updated_count += 1
+                                            else:
+                                                st.error(f"Failed to update QA pair: '{question[:50]}...'")
+                                                error_count += 1
+                                        else:  # Save as new
+                                            success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
+                                            if success:
+                                                saved_count += 1
+                                            else:
+                                                st.error(f"Failed to save new QA pair: '{question[:50]}...'")
+                                                error_count += 1
                                     else:
-                                        st.error("Failed to update QA pair.")
-                                        error_count += 1
-                                else:  # Save as new
-                                    success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
-                                    if success:
-                                        st.success("New QA pair saved successfully!")
-                                        saved_count += 1
-                                    else:
-                                        st.error("Failed to save new QA pair.")
-                                        error_count += 1
-                            else:
-                                success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
-                                if success:
-                                    st.success("New QA pair saved successfully!")
-                                    saved_count += 1
-                                else:
-                                    st.error("Failed to save new QA pair.")
+                                        success = AppDatabase.store_qa_pair(project_id, question, answer, call_id)
+                                        if success:
+                                            saved_count += 1
+                                        else:
+                                            st.error(f"Failed to save QA pair: '{question[:50]}...'")
+                                            error_count += 1
+                                            
+                                    # Add a small delay to prevent database locking
+                                    time.sleep(0.1)
+                                    
+                                except Exception as e:
+                                    st.error(f"Error processing QA pair: {str(e)}")
                                     error_count += 1
                         
                         # Show import results
@@ -879,10 +896,13 @@ with tab2:
                             result_msg.append(f"{error_count} errors encountered")
                         
                         if saved_count > 0 or updated_count > 0:
-                            st.success(f"Import completed! {' and '.join(result_msg)}")
+                            st.success(f"Import completed successfully! {' and '.join(result_msg)}")
+                            # Give user time to see the success message before refreshing
+                            time.sleep(2)
                             st.rerun()
                         else:
                             st.error(f"Import failed. {' and '.join(result_msg)}")
+                            st.write("Please check the console logs for more details or try again.")
                 
         except Exception as e:
             st.error(f"Error processing file: {str(e)}")
