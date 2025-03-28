@@ -9,7 +9,7 @@ import os
 load_dotenv()
 
 gemini_api_key = os.getenv("GEMINI_API_KEY")
-openai_api_key = "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"
+openai_api_key = "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"
 openai_client = OpenAI(api_key=openai_api_key) if openai_api_key else None
 
 GEMINI_MODELS = ['gemini-2.0-pro-exp-02-05', 'gemini-1.5-flash']

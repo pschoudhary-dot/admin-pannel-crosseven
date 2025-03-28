@@ -54,7 +54,7 @@ if "user_id" not in st.session_state:
                 if success:
                     st.success(f"Sign up successful! Account created for {signup_username}. Please sign in.")
                     st.session_state.form_submitted = True
-                    st.rerun()
+                    # st.rerun()
                 else:
                     st.error("Sign up failed: Username already exists.")
 else:
