@@ -706,3 +706,224 @@ class AppDatabase:
             return False
         finally:
             conn.close()
+
+    @staticmethod
+    def store_qa_temp_with_similarity(project_id, question, answer, source_type, source_id=None, similarity_score=0.0, similar_qa_id=None):
+        """Store QA pair in temporary storage with similarity information."""
+        if not project_id or not question or not answer or not source_type:
+            print("Missing required data for QA temp pair")
+            return False
+
+        try:
+            project_id = int(project_id)
+        except (ValueError, TypeError):
+            print(f"Invalid project_id format: {project_id}")
+            return False
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("SELECT project_id FROM projects WHERE project_id = ?", (project_id,))
+            project = cursor.fetchone()
+            if not project:
+                print(f"Project ID {project_id} does not exist")
+                return False
+
+            cursor.execute("""
+            INSERT INTO qa_temp (
+                project_id, question, answer, source_type, source_id, 
+                is_reviewed, similarity_score, similar_qa_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                project_id, question.strip(), answer.strip(), source_type, source_id,
+                0, similarity_score, similar_qa_id
+            ))
+            
+            conn.commit()
+            print(f"QA temp pair stored successfully with similarity info for project_id {project_id}")
+            print(f"Similarity score: {similarity_score}, Similar QA ID: {similar_qa_id}")
+            return True
+
+        except sqlite3.IntegrityError as e:
+            print(f"Failed to store QA temp pair due to IntegrityError: {e}")
+            conn.rollback()
+            return False
+        except Exception as e:
+            print(f"Unexpected error storing QA temp pair: {str(e)}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_qa_pair_by_id(project_id, qa_id):
+        """Get a specific QA pair by ID."""
+        if not project_id or not qa_id:
+            return None
+            
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+            SELECT id, question, answer, call_id, is_trained, created_at
+            FROM qa_pairs WHERE project_id = ? AND id = ?
+            """, (project_id, qa_id))
+            qa_pair = cursor.fetchone()
+            conn.close()
+            
+            if qa_pair:
+                return dict(qa_pair)
+            return None
+        except Exception as e:
+            print(f"Error retrieving QA pair by ID: {str(e)}")
+            conn.close()
+            return None
+
+    @staticmethod
+    def update_qa_similarities(project_id):
+        """Update similarity scores for all QA temp pairs."""
+        from utils.qa_utils import calculate_qa_similarities
+        
+        # Get existing QA pairs from both tables
+        qa_temp_pairs = AppDatabase.get_project_qa_temp(project_id)
+        existing_qa_pairs = AppDatabase.get_project_qa_pairs(project_id)
+        
+        if not qa_temp_pairs or not existing_qa_pairs:
+            return False
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        try:
+            for qa_temp in qa_temp_pairs:
+                # Skip already reviewed or already similar QA pairs
+                if qa_temp['is_reviewed'] or qa_temp['similarity_score'] > 0:
+                    continue
+                
+                # Find similar questions
+                similar_qa = None
+                max_similarity = 0.0
+                
+                for qa in existing_qa_pairs:
+                    from utils.qa_utils import calculate_text_similarity
+                    similarity = calculate_text_similarity(qa_temp['question'], qa['question'])
+                    
+                    if similarity > max_similarity and similarity > 0.8:  # Threshold
+                        max_similarity = similarity
+                        similar_qa = qa
+                
+                # Update similarity if found
+                if similar_qa:
+                    cursor.execute("""
+                    UPDATE qa_temp SET similarity_score = ?, similar_qa_id = ?
+                    WHERE id = ? AND project_id = ?
+                    """, (max_similarity, similar_qa['id'], qa_temp['id'], project_id))
+            
+            conn.commit()
+            print(f"Updated similarity scores for QA temp pairs in project {project_id}")
+            return True
+            
+        except Exception as e:
+            print(f"Error updating similarity scores: {str(e)}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    @staticmethod
+    def batch_store_qa_pairs(project_id, qa_pairs):
+        """Store multiple QA pairs in a batch for better performance."""
+        if not project_id or not qa_pairs:
+            return 0
+            
+        try:
+            project_id = int(project_id)
+        except (ValueError, TypeError):
+            print(f"Invalid project_id format: {project_id}")
+            return 0
+            
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Verify project exists
+            cursor.execute("SELECT project_id FROM projects WHERE project_id = ?", (project_id,))
+            if not cursor.fetchone():
+                print(f"Project ID {project_id} does not exist")
+                return 0
+                
+            # Use transactions for better performance
+            success_count = 0
+            
+            for qa in qa_pairs:
+                call_id = qa.get('call_id')
+                question = qa.get('question', '').strip()
+                answer = qa.get('answer', '').strip()
+                
+                if not question or not answer:
+                    continue
+                    
+                # Check if call_id exists for this project
+                if call_id:
+                    cursor.execute(
+                        "SELECT call_id FROM calls WHERE call_id = ? AND project_id = ?", 
+                        (call_id, project_id)
+                    )
+                    if not cursor.fetchone():
+                        call_id = None
+                
+                try:
+                    if call_id is None:
+                        cursor.execute("""
+                        INSERT INTO qa_pairs (project_id, call_id, question, answer, is_trained) 
+                        VALUES (?, NULL, ?, ?, 0)
+                        """, (project_id, question, answer))
+                    else:
+                        cursor.execute("""
+                        INSERT INTO qa_pairs (project_id, call_id, question, answer, is_trained) 
+                        VALUES (?, ?, ?, ?, 0)
+                        """, (project_id, call_id, question, answer))
+                        
+                    success_count += 1
+                except sqlite3.IntegrityError as e:
+                    print(f"Failed to store QA pair due to IntegrityError: {e}")
+                    continue
+            
+            conn.commit()
+            print(f"Batch stored {success_count} QA pairs successfully for project_id {project_id}")
+            return success_count
+            
+        except Exception as e:
+            print(f"Unexpected error in batch storing QA pairs: {str(e)}")
+            conn.rollback()
+            return 0
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_qa_temp_with_similarity(project_id, min_similarity=0.8):
+        """Get QA temp pairs with similarity scores above threshold."""
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+            SELECT id, question, answer, source_type, source_id, 
+                similarity_score, similar_qa_id, created_at 
+            FROM qa_temp 
+            WHERE project_id = ? AND similarity_score >= ?
+            ORDER BY similarity_score DESC
+            """, (project_id, min_similarity))
+            
+            qa_temp_pairs = cursor.fetchall()
+            conn.close()
+            
+            if qa_temp_pairs:
+                return [dict(qa) for qa in qa_temp_pairs]
+            return []
+        except Exception as e:
+            print(f"Error retrieving QA temp with similarity: {str(e)}")
+            conn.close()
+            return []

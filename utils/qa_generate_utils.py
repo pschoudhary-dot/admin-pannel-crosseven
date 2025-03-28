@@ -1,23 +1,51 @@
 import streamlit as st
 import pandas as pd
 from utils.db import AppDatabase
-# In qa_generate_utils.py - fix the imports
-from utils.qa_utils import generate_qa_from_transcript, generate_qa_from_document_chunk, preprocess_text, extract_md_sections
+from utils.qa_utils import (
+    generate_qa_from_transcript, 
+    generate_qa_from_document_chunk, 
+    preprocess_text, 
+    extract_md_sections,
+    calculate_qa_similarities
+)
 from utils.file_utils import save_uploaded_file
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import time
 
 def save_and_review_qa_pairs(project_id, qa_pairs, source_type, source_id):
-    """Save QA pairs to temporary storage and provide review interface."""
-    for qa in qa_pairs:
-        if not AppDatabase.store_qa_temp(project_id, qa['question'], qa['answer'], source_type, source_id):
-            st.error(f"Failed to save a QA pair to temporary storage.")
-            return False
-    return True
+    """Save QA pairs to temporary storage with similarity scoring and provide review interface."""
+    # Calculate similarity scores for all QA pairs
+    enhanced_qa_pairs = calculate_qa_similarities(project_id, qa_pairs)
+    
+    # Store each pair with similarity information
+    success_count = 0
+    for qa in enhanced_qa_pairs:
+        # Extract similarity data
+        similarity_score = qa.get('similarity_score', 0.0)
+        similar_qa_id = qa.get('similar_qa_id', None)
+        
+        # Store in database with similarity info
+        if AppDatabase.store_qa_temp_with_similarity(
+            project_id, 
+            qa['question'], 
+            qa['answer'], 
+            source_type, 
+            source_id,
+            similarity_score,
+            similar_qa_id
+        ):
+            success_count += 1
+        else:
+            st.error(f"Failed to save QA pair to temporary storage: {qa['question'][:50]}...")
+    
+    return success_count > 0
 
 def display_review_interface(project_id, source_type, source_id=None):
-    """Display and manage QA pairs in temporary storage."""
+    """Display and manage QA pairs in temporary storage with similarity information."""
     temp_qa_pairs = AppDatabase.get_project_qa_temp(project_id)
+    
+    temp_qa_pairs = [dict(qa) for qa in temp_qa_pairs]
+    
     if source_id:
         temp_qa_pairs = [qa for qa in temp_qa_pairs if qa['source_id'] == source_id and qa['source_type'] == source_type]
     else:
@@ -28,16 +56,40 @@ def display_review_interface(project_id, source_type, source_id=None):
         return
 
     st.subheader("Review and Select QA Pairs")
+    
     qa_df = pd.DataFrame([{
         "Select": True,
         "Question": qa["question"],
         "Answer": qa["answer"],
         "Source ID": qa["source_id"],
+        "Similarity": f"{qa['similarity_score']:.2f}" if qa['similarity_score'] is not None else "N/A",
+        "Similar QA": qa["similar_qa_id"] if qa["similar_qa_id"] is not None else "None",
         "ID": qa["id"]
     } for qa in temp_qa_pairs])
-    edited_df = st.data_editor(qa_df, hide_index=True, use_container_width=True)
+    
+    # Display the enhanced dataframe
+    st.write("QA pairs with similarity scores:")
+    st.write("🔴 Red highlighting indicates potentially duplicate questions (similarity ≥ 0.9)")
+    st.write("🟡 Yellow highlighting indicates similar questions (similarity ≥ 0.85)")
+    
+    edited_df = st.data_editor(
+        qa_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Similarity": st.column_config.NumberColumn(
+                "Similarity Score",
+                format="%.2f",
+                help="How similar this question is to existing QA pairs"
+            ),
+            "Similar QA": st.column_config.TextColumn(
+                "Similar QA ID",
+                help="ID of the most similar existing question"
+            )
+        }
+    )
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Save Selected QA Pairs", key=f"save_selected_{source_type}_{source_id or 'manual'}"):
             selected_rows = edited_df[edited_df["Select"]]
@@ -64,9 +116,82 @@ def display_review_interface(project_id, source_type, source_id=None):
                 st.success(f"Removed {removed_count} QA pairs from temporary storage!")
                 time.sleep(1)
                 st.rerun()
+    with col3:
+        if st.button("Deduplicate Similar QA Pairs", key=f"deduplicate_{source_type}_{source_id or 'manual'}"):
+            # Keep only one of each highly similar group
+            similarity_threshold = 0.9
+            kept_questions = set()
+            removed_count = 0
+            
+            # First pass - mark duplicates
+            for qa in temp_qa_pairs:
+                similarity_score = qa.get('similarity_score', 0)
+                if similarity_score is not None and similarity_score >= similarity_threshold:
+                    # If we already have a similar question in our kept set, remove this one
+                    keep_this = True
+                    for kept_q in kept_questions:
+                        if qa["question"] == kept_q:
+                            # Exact duplicate - remove
+                            AppDatabase.remove_qa_temp(project_id, qa["id"])
+                            removed_count += 1
+                            keep_this = False
+                            break
+                    
+                    if keep_this:
+                        kept_questions.add(qa["question"])
+            
+            if removed_count > 0:
+                st.success(f"Removed {removed_count} duplicate QA pairs!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.info("No duplicate QA pairs found.")
+                
+    # If similarities exist, show a more detailed view
+    if any(qa.get('similarity_score', 0) and qa.get('similarity_score', 0) > 0.8 for qa in temp_qa_pairs):
+        st.subheader("Similar Question Analysis")
+        st.write("The following questions have similar existing questions in the main QA database:")
+        
+        for qa in temp_qa_pairs:
+            similarity_score = qa.get('similarity_score')
+            similar_qa_id = qa.get('similar_qa_id')
+            
+            if similarity_score and similarity_score > 0.8 and similar_qa_id:
+                similar_qa = AppDatabase.get_qa_pair_by_id(project_id, similar_qa_id)
+                if similar_qa:
+                    # Convert to dict if needed
+                    if not isinstance(similar_qa, dict):
+                        similar_qa = dict(similar_qa)
+                        
+                    with st.expander(f"New: '{qa['question']}' (Similarity: {similarity_score:.2f})"):
+                        st.write("**New Question:**", qa['question'])
+                        st.write("**New Answer:**", qa['answer'])
+                        st.write("---")
+                        st.write("**Similar Existing Question:**", similar_qa['question'])
+                        st.write("**Existing Answer:**", similar_qa['answer'])
+                        st.write(f"**Similarity Score:** {similarity_score:.2f}")
+                        
+                        # Buttons for this specific pair
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            if st.button("Keep New Version", key=f"keep_new_{qa['id']}"):
+                                # Replace old with new
+                                if AppDatabase.remove_qa_pair(project_id, similar_qa['id']) and \
+                                   AppDatabase.store_qa_pair(project_id, qa['question'], qa['answer'], qa['source_id']):
+                                    AppDatabase.remove_qa_temp(project_id, qa['id'])
+                                    st.success("Replaced existing QA with new version!")
+                                    time.sleep(1)
+                                    st.rerun()
+                        with c2:
+                            if st.button("Discard New Version", key=f"discard_new_{qa['id']}"):
+                                # Just remove the new one
+                                AppDatabase.remove_qa_temp(project_id, qa['id'])
+                                st.success("Discarded new version, keeping existing QA!")
+                                time.sleep(1)
+                                st.rerun()
 
 def handle_manual_qa(project_id):
-    """Handle manual QA entry."""
+    """Handle manual QA entry with similarity checking."""
     with st.form(key="manual_qa_form"):
         question = st.text_input("Question", key="manual_question")
         answer = st.text_area("Answer", key="manual_answer")
@@ -80,19 +205,57 @@ def handle_manual_qa(project_id):
             question = question.strip()
             answer = answer.strip()
             call_id = call_id.strip() if call_id else None
-            qa_pairs = [{"question": question, "answer": answer, "call_id": call_id}]
-            if save_and_review_qa_pairs(project_id, qa_pairs, "manual", "manual"):
-                st.success("QA pair saved to temporary storage successfully!")
-                display_review_interface(project_id, "manual", "manual")
+            
+            # Check for similar questions before saving
+            from utils.qa_utils import check_duplicate_qa
+            existing_qa = check_duplicate_qa(project_id, question)
+            
+            if existing_qa and existing_qa.get('similarity_score', 0) > 0.9:
+                st.warning(f"This question is very similar to an existing one: '{existing_qa['question']}'")
+                st.info("You can still save it or modify your question to be more distinct.")
+                
+                # Show the existing QA for comparison
+                with st.expander("View Similar Existing QA"):
+                    st.write("**Existing Question:**", existing_qa['question'])
+                    st.write("**Existing Answer:**", existing_qa['answer'])
+                    st.write(f"**Similarity Score:** {existing_qa.get('similarity_score', 0):.2f}")
+                
+                # Offer to continue or cancel
+                if st.button("Save Anyway"):
+                    qa_pairs = [{
+                        "question": question, 
+                        "answer": answer, 
+                        "call_id": call_id,
+                        "similarity_score": existing_qa.get('similarity_score', 0),
+                        "similar_qa_id": existing_qa['id']
+                    }]
+                    if save_and_review_qa_pairs(project_id, qa_pairs, "manual", "manual"):
+                        st.success("QA pair saved to temporary storage successfully!")
+                        display_review_interface(project_id, "manual", "manual")
+            else:
+                # No significant similarity found, proceed normally
+                qa_pairs = [{"question": question, "answer": answer, "call_id": call_id}]
+                if save_and_review_qa_pairs(project_id, qa_pairs, "manual", "manual"):
+                    st.success("QA pair saved to temporary storage successfully!")
+                    display_review_interface(project_id, "manual", "manual")
 
 def handle_transcript_qa(project_id, ai_provider, selected_model):
-    """Handle QA generation from call transcripts."""
+    """Handle QA generation from call transcripts with improved generation and similarity checking."""
     calls = AppDatabase.get_project_calls(project_id)
     if not calls:
         st.warning("No calls available. Please add calls in the Call Management page first.")
         return
 
     call_options = st.radio("Select calls to process:", ["Select specific call", "Process multiple calls", "Process all calls"])
+    
+    # Enhanced provider and model selection at function level
+    col1, col2 = st.columns(2)
+    with col1:
+        generation_attempts = st.number_input("Generation attempts per call", min_value=1, max_value=3, value=1,
+                                           help="If the first attempt generates fewer than 3 QA pairs, try again this many times")
+    with col2:
+        min_qa_pairs = st.number_input("Minimum QA pairs expected", min_value=1, max_value=10, value=3,
+                                     help="Minimum number of QA pairs to consider successful generation")
     
     if call_options == "Select specific call":
         call_id = st.selectbox("Select Call ID", [call["call_id"] for call in calls])
@@ -105,12 +268,27 @@ def handle_transcript_qa(project_id, ai_provider, selected_model):
             with st.spinner("Generating QA pairs..."):
                 call = AppDatabase.get_call(project_id, call_id)
                 if call and call["transcript"]:
-                    qa_pairs = generate_qa_from_transcript(call["transcript"], call_id, ai_provider, selected_model)
+                    attempts = 0
+                    qa_pairs = []
+                    
+                    while attempts < generation_attempts and (not qa_pairs or len(qa_pairs) < min_qa_pairs):
+                        attempts += 1
+                        if attempts > 1:
+                            st.info(f"Attempt {attempts}: Generated only {len(qa_pairs)} QA pairs, trying again...")
+                        
+                        qa_pairs = generate_qa_from_transcript(call["transcript"], call_id, ai_provider, selected_model)
+                    
                     if not qa_pairs:
-                        st.warning(f"No QA pairs could be generated from call {call_id}.")
-                    elif save_and_review_qa_pairs(project_id, qa_pairs, "transcript", call_id):
-                        st.success(f"Generated and saved {len(qa_pairs)} QA pairs to temporary storage!")
-                        display_review_interface(project_id, "transcript", call_id)
+                        st.warning(f"Could not generate any QA pairs from call {call_id} after {attempts} attempts.")
+                    elif len(qa_pairs) < min_qa_pairs:
+                        st.warning(f"Generated only {len(qa_pairs)} QA pairs (fewer than desired minimum of {min_qa_pairs}).")
+                        if save_and_review_qa_pairs(project_id, qa_pairs, "transcript", call_id):
+                            st.success(f"Saved {len(qa_pairs)} QA pairs to temporary storage.")
+                            display_review_interface(project_id, "transcript", call_id)
+                    else:
+                        st.success(f"Generated {len(qa_pairs)} QA pairs from transcript!")
+                        if save_and_review_qa_pairs(project_id, qa_pairs, "transcript", call_id):
+                            display_review_interface(project_id, "transcript", call_id)
 
     elif call_options == "Process multiple calls":
         num_calls = st.slider("Number of calls to process", min_value=1, max_value=min(50, len(calls)), value=5)
@@ -123,19 +301,34 @@ def handle_transcript_qa(project_id, ai_provider, selected_model):
             with st.spinner(f"Generating QA pairs from {len(selected_calls)} calls..."):
                 all_qa_pairs = []
                 progress_bar = st.progress(0)
+                
                 for i, call_id in enumerate(selected_calls):
                     call = AppDatabase.get_call(project_id, call_id)
                     if call and call["transcript"]:
-                        qa_pairs = generate_qa_from_transcript(call["transcript"], call_id, ai_provider, selected_model)
-                        all_qa_pairs.extend(qa_pairs)
+                        attempts = 0
+                        call_qa_pairs = []
+                        
+                        while attempts < generation_attempts and (not call_qa_pairs or len(call_qa_pairs) < min_qa_pairs):
+                            attempts += 1
+                            call_qa_pairs = generate_qa_from_transcript(call["transcript"], call_id, ai_provider, selected_model)
+                        
+                        if call_qa_pairs:
+                            all_qa_pairs.extend(call_qa_pairs)
+                            st.write(f"Generated {len(call_qa_pairs)} QA pairs from call {call_id}")
+                        else:
+                            st.warning(f"Could not generate QA pairs from call {call_id}")
+                    
                     progress_bar.progress((i + 1) / len(selected_calls))
                     time.sleep(0.5)
+                
                 progress_bar.empty()
+                
                 if not all_qa_pairs:
                     st.warning("No QA pairs could be generated from the selected calls.")
-                elif save_and_review_qa_pairs(project_id, all_qa_pairs, "transcript", None):
-                    st.success(f"Generated and saved {len(all_qa_pairs)} QA pairs to temporary storage!")
-                    display_review_interface(project_id, "transcript")
+                else:
+                    if save_and_review_qa_pairs(project_id, all_qa_pairs, "transcript", None):
+                        st.success(f"Generated and saved {len(all_qa_pairs)} QA pairs to temporary storage!")
+                        display_review_interface(project_id, "transcript")
 
     elif call_options == "Process all calls":
         max_calls = st.slider("Maximum number of calls to process", min_value=1, max_value=len(calls), value=min(20, len(calls)))
@@ -144,21 +337,36 @@ def handle_transcript_qa(project_id, ai_provider, selected_model):
             with st.spinner(f"Generating QA pairs from {len(calls_to_process)} calls..."):
                 all_qa_pairs = []
                 progress_bar = st.progress(0)
+                
                 for i, call in enumerate(calls_to_process):
                     if call and call["transcript"]:
-                        qa_pairs = generate_qa_from_transcript(call["transcript"], call["call_id"], ai_provider, selected_model)
-                        all_qa_pairs.extend(qa_pairs)
+                        attempts = 0
+                        call_qa_pairs = []
+                        
+                        while attempts < generation_attempts and (not call_qa_pairs or len(call_qa_pairs) < min_qa_pairs):
+                            attempts += 1
+                            call_qa_pairs = generate_qa_from_transcript(call["transcript"], call["call_id"], ai_provider, selected_model)
+                        
+                        if call_qa_pairs:
+                            all_qa_pairs.extend(call_qa_pairs)
+                            st.write(f"Generated {len(call_qa_pairs)} QA pairs from call {call['call_id']}")
+                        else:
+                            st.warning(f"Could not generate QA pairs from call {call['call_id']}")
+                    
                     progress_bar.progress((i + 1) / len(calls_to_process))
                     time.sleep(0.5)
+                
                 progress_bar.empty()
+                
                 if not all_qa_pairs:
                     st.warning("No QA pairs could be generated from the calls.")
-                elif save_and_review_qa_pairs(project_id, all_qa_pairs, "transcript", None):
-                    st.success(f"Generated and saved {len(all_qa_pairs)} QA pairs to temporary storage!")
-                    display_review_interface(project_id, "transcript")
+                else:
+                    if save_and_review_qa_pairs(project_id, all_qa_pairs, "transcript", None):
+                        st.success(f"Generated and saved {len(all_qa_pairs)} QA pairs to temporary storage!")
+                        display_review_interface(project_id, "transcript")
 
 def handle_document_qa(project_id, ai_provider, selected_model):
-    """Handle QA generation from uploaded documents with chunk preview and improved error handling."""
+    """Handle QA generation from uploaded documents with improved processing and similarity checking."""
     st.write("Upload a document to generate QA pairs from its content.")
     uploaded_file = st.file_uploader("Upload .txt or .md file", type=["txt", "md"])
     
@@ -182,14 +390,27 @@ def handle_document_qa(project_id, ai_provider, selected_model):
                 st.write("Preprocessed Text Sample (first 500 chars):")
                 st.text_area("Preprocessed", preprocessed_text[:500], height=200, disabled=True)
 
-            # Chunking options with explanations
+            # Improved chunk options
+            st.subheader("Chunking Settings")
             st.info("Adjust chunk size based on the complexity of your document. Larger chunks provide more context but may result in fewer but more comprehensive QA pairs.")
-            chunk_size = st.slider("Chunk Size", min_value=500, max_value=5000, value=1500, step=100)
             
-            # Text splitter with adjustable overlap
-            chunk_overlap = st.slider("Chunk Overlap", min_value=0, max_value=500, value=200, step=50,
-                                    help="Overlap between chunks to ensure context is maintained.")
+            col1, col2 = st.columns(2)
+            with col1:
+                chunk_size = st.slider("Chunk Size", min_value=500, max_value=5000, value=1500, step=100)
+            with col2:
+                chunk_overlap = st.slider("Chunk Overlap", min_value=0, max_value=500, value=200, step=50,
+                                        help="Overlap between chunks to ensure context is maintained.")
             
+            # Generation settings
+            col1, col2 = st.columns(2)
+            with col1:
+                generation_attempts = st.number_input("Generation attempts per chunk", min_value=1, max_value=3, value=1,
+                                                  help="If the first attempt generates fewer than min QA pairs, try again")
+            with col2:
+                min_qa_pairs = st.number_input("Minimum QA pairs per chunk", min_value=1, max_value=10, value=3,
+                                             help="Minimum number of QA pairs to consider successful for each chunk")
+            
+            # Create text splitter and get chunks
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
             chunks = text_splitter.split_text(preprocessed_text)
             
@@ -223,16 +444,21 @@ def handle_document_qa(project_id, ai_provider, selected_model):
                         
                         for i, chunk in enumerate(chunks_to_process):
                             try:
-                                # Add debugging
-                                if i == 0:  # Just show debug for first chunk
-                                    st.write(f"Debug - Processing chunk {i+1} with {len(chunk)} characters.")
-                                    
-                                chunk_qa_pairs = generate_qa_from_document_chunk(chunk, uploaded_file.name, ai_provider, selected_model)
+                                # Generate QA pairs from the chunk with retry logic
+                                attempts = 0
+                                chunk_qa_pairs = []
+                                
+                                while attempts < generation_attempts and (not chunk_qa_pairs or len(chunk_qa_pairs) < min_qa_pairs):
+                                    attempts += 1
+                                    chunk_qa_pairs = generate_qa_from_document_chunk(
+                                        chunk, uploaded_file.name, ai_provider, selected_model
+                                    )
                                 
                                 if chunk_qa_pairs:
                                     all_qa_pairs.extend(chunk_qa_pairs)
+                                    st.write(f"Generated {len(chunk_qa_pairs)} QA pairs from chunk {i+1}")
                                 else:
-                                    st.info(f"No QA pairs generated for chunk {i+1}. This could be because the content is not suitable for QA generation.")
+                                    st.info(f"No QA pairs generated for chunk {i+1}.")
                                     
                             except Exception as e:
                                 st.error(f"Error processing chunk {i+1}: {str(e)}")
@@ -244,13 +470,16 @@ def handle_document_qa(project_id, ai_provider, selected_model):
                         progress_bar.empty()
                         
                         if not all_qa_pairs:
-                            st.warning("No QA pairs could be generated from the document. The content may not be suitable for QA generation or there might be API issues.")
+                            st.warning("No QA pairs could be generated from the document.")
                         else:
+                            total_qa_pairs = len(all_qa_pairs)
+                            st.success(f"Generated a total of {total_qa_pairs} QA pairs from {len(chunks_to_process)} chunks!")
+                            
+                            # Calculate similarities and store in temp
                             if save_and_review_qa_pairs(project_id, all_qa_pairs, file_type, uploaded_file.name):
-                                st.success(f"Generated and saved {len(all_qa_pairs)} QA pairs to temporary storage!")
                                 display_review_interface(project_id, file_type, uploaded_file.name)
                             else:
-                                st.error("Failed to save generated QA pairs to temporary storage. Please check database connectivity.")
+                                st.error("Failed to save QA pairs to temporary storage.")
                     except Exception as e:
                         st.error(f"Error processing document: {str(e)}")
         except UnicodeDecodeError:

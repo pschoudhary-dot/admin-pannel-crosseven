@@ -12,3 +12,5 @@ langchain-text-splitters
 tqdm
 openpyxl
 langfuse
+scikit-learn
+numpy
