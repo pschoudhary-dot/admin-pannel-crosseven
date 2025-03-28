@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import json
 
 DB_PATH = "DB/retell.db"
 
@@ -158,6 +159,7 @@ class AppDatabase:
                 dataset_name TEXT NOT NULL,
                 file_path TEXT NOT NULL,
                 source_type TEXT,
+                qa_pairs_ids TEXT,  -- JSON array of qa_pair IDs included in the dataset
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
             )
@@ -667,7 +669,7 @@ class AppDatabase:
         """, (project_id,))
         qa_pairs = cursor.fetchall()
         conn.close()
-        return qa_pairs
+        return [dict(qa) for qa in qa_pairs]
 
     @staticmethod
     def remove_qa_temp(project_id, qa_id):
@@ -831,6 +833,34 @@ class AppDatabase:
             return False
         finally:
             conn.close()
+
+    @staticmethod
+    def store_dataset(project_id, dataset_name, file_path, source_type, qa_pairs_ids):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+            INSERT INTO datasets (project_id, dataset_name, file_path, source_type, qa_pairs_ids)
+            VALUES (?, ?, ?, ?, ?)
+            """, (project_id, dataset_name, file_path, source_type, json.dumps(qa_pairs_ids)))
+            conn.commit()
+            dataset_id = cursor.lastrowid
+            return dataset_id
+        except Exception as e:
+            print(f"Error storing dataset: {e}")
+            conn.rollback()
+            return None
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_project_datasets(project_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT dataset_id, dataset_name, file_path, source_type, qa_pairs_ids, created_at FROM datasets WHERE project_id = ?", (project_id,))
+        datasets = cursor.fetchall()
+        conn.close()
+        return [dict(dataset) for dataset in datasets]
 
     @staticmethod
     def batch_store_qa_pairs(project_id, qa_pairs):
