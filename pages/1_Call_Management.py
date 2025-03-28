@@ -2,10 +2,9 @@ import streamlit as st
 from utils.db import AppDatabase
 from dotenv import load_dotenv
 import os
-import json
 from retell import Retell
 import pandas as pd
-
+import io
 load_dotenv()
 
 # Initialize Retell SDK client
@@ -78,7 +77,8 @@ with tab1:
                         if not call_id:
                             continue
                         if call_id in existing_call_ids:
-                            continue  # Skip already stored calls
+                            st.write(f"Call ID '{call_id}' already exists in this project. Skipping.")
+                            continue
                         fetched_calls.append({"call_id": call_id, "transcript": transcript})
                     st.session_state.fetched_calls = fetched_calls
                     st.success(f"Fetched {len(fetched_calls)} new successful calls!")
@@ -103,24 +103,43 @@ with tab1:
     elif "fetched_calls" in st.session_state:
         st.subheader("Fetched Calls")
         selected_calls = st.multiselect("Select Calls to Store", 
-                                      [call["call_id"] for call in st.session_state.fetched_calls],
-                                      key="select_calls")
-        if st.button("Store Selected Calls", key="store_selected_button"):
-            if not selected_calls:
-                st.error("Please select at least one call to store.")
-            else:
-                stored_count = 0
-                for call_id in selected_calls:
-                    call = next(c for c in st.session_state.fetched_calls if c["call_id"] == call_id)
-                    success = AppDatabase.store_call(project_id, call["call_id"], call["transcript"])
-                    if success:
-                        st.success(f"Call '{call['call_id']}' stored successfully in project '{project_name}'!")
-                        stored_count += 1
+                                       [call["call_id"] for call in st.session_state.fetched_calls],
+                                       key="select_calls")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Store Selected Calls", key="store_selected_button"):
+                if not selected_calls:
+                    st.error("Please select at least one call to store.")
+                else:
+                    stored_count = 0
+                    for call_id in selected_calls:
+                        call = next(c for c in st.session_state.fetched_calls if c["call_id"] == call_id)
+                        success = AppDatabase.store_call(project_id, call["call_id"], call["transcript"])
+                        if success:
+                            stored_count += 1
+                    if stored_count > 0:
+                        st.success(f"Stored {stored_count} selected calls successfully!")
+                        del st.session_state.fetched_calls
+                        st.rerun()
                     else:
-                        st.error(f"Failed to store Call '{call['call_id']}'. It may already exist.")
-                if stored_count > 0:
-                    del st.session_state.fetched_calls
-                    st.rerun()
+                        st.error("Failed to store selected calls. They may already exist.")
+        with col2:
+            if st.button("Store All Fetched Calls", key="store_all_button"):
+                if not st.session_state.fetched_calls:
+                    st.warning("No fetched calls to store.")
+                else:
+                    with st.spinner("Storing all fetched calls..."):
+                        stored_count = 0
+                        for call in st.session_state.fetched_calls:
+                            success = AppDatabase.store_call(project_id, call["call_id"], call["transcript"])
+                            if success:
+                                stored_count += 1
+                        if stored_count > 0:
+                            st.success(f"Stored {stored_count} new calls successfully!")
+                            del st.session_state.fetched_calls
+                            st.rerun()
+                        else:
+                            st.warning("No new calls were stored. They might already exist in the database.")
     
     # Display fetched calls for review
     if "fetched_calls" in st.session_state:

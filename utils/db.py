@@ -58,12 +58,24 @@ class AppDatabase:
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS projects (
                 project_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
                 project_name TEXT NOT NULL,
                 description TEXT,
+                created_by INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(user_id),
-                UNIQUE (user_id, project_name)
+                FOREIGN KEY (created_by) REFERENCES users(user_id)
+            )
+            ''')
+
+            # Project_users table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS project_users (
+                project_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (project_id, user_id),
+                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
             ''')
 
@@ -76,7 +88,7 @@ class AppDatabase:
                 file_path TEXT NOT NULL,
                 file_type TEXT,
                 uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects(project_id)
+                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
             )
             ''')
 
@@ -87,7 +99,7 @@ class AppDatabase:
                 project_id INTEGER NOT NULL,
                 transcript TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects(project_id)
+                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
             )
             ''')
 
@@ -101,11 +113,11 @@ class AppDatabase:
                 content TEXT,
                 utterance_index INTEGER,
                 FOREIGN KEY (call_id) REFERENCES calls(call_id),
-                FOREIGN KEY (project_id) REFERENCES projects(project_id)
+                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
             )
             ''')
 
-            # QA Pairs table (main table)
+            # QA Pairs table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS qa_pairs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,13 +125,14 @@ class AppDatabase:
                 call_id TEXT,
                 question TEXT,
                 answer TEXT,
+                is_trained BOOLEAN DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects(project_id),
+                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
                 FOREIGN KEY (call_id) REFERENCES calls(call_id)
             )
             ''')
 
-            # QA Temp table (temporary storage of generated QA pairs)
+            # QA Temp table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS qa_temp (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,13 +141,11 @@ class AppDatabase:
                 answer TEXT NOT NULL,
                 source_type TEXT NOT NULL,
                 source_id TEXT,
-                is_trained BOOLEAN DEFAULT 0,
                 is_reviewed BOOLEAN DEFAULT 0,
                 similarity_score REAL,
                 similar_qa_id INTEGER,
-                metadata TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects(project_id),
+                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
                 FOREIGN KEY (similar_qa_id) REFERENCES qa_pairs(id)
             )
             ''')
@@ -148,11 +159,11 @@ class AppDatabase:
                 file_path TEXT NOT NULL,
                 source_type TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects(project_id)
+                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
             )
             ''')
 
-            # Models table (tracks models trained on datasets)
+            # Models table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS models (
                 model_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,19 +171,18 @@ class AppDatabase:
                 dataset_id INTEGER NOT NULL,
                 model_name TEXT NOT NULL,
                 model_path TEXT NOT NULL,
-                model_type TEXT NOT NULL,
                 version TEXT,
-                qa_temp_ids TEXT,
+                qa_pairs_id TEXT,
                 trained_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects(project_id),
+                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
                 FOREIGN KEY (dataset_id) REFERENCES datasets(dataset_id)
             )
             ''')
 
-            # Indices for faster lookups
+            # Indices
             cursor.execute('''CREATE INDEX IF NOT EXISTS idx_qa_temp_project ON qa_temp(project_id)''')
             cursor.execute('''CREATE INDEX IF NOT EXISTS idx_qa_temp_source ON qa_temp(source_type, source_id)''')
-            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_qa_temp_trained ON qa_temp(is_trained)''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_qa_temp_reviewed ON qa_temp(is_reviewed)''')
             cursor.execute('''CREATE INDEX IF NOT EXISTS idx_models_project ON models(project_id)''')
             cursor.execute('''CREATE INDEX IF NOT EXISTS idx_models_dataset ON models(dataset_id)''')
 
@@ -224,25 +234,48 @@ class AppDatabase:
     def get_user_projects(user_id):
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT project_id, project_name FROM projects WHERE user_id = ?", (user_id,))
+        cursor.execute("""
+            SELECT p.project_id, p.project_name, pu.role 
+            FROM projects p 
+            JOIN project_users pu ON p.project_id = pu.project_id 
+            WHERE pu.user_id = ?
+        """, (user_id,))
         projects = cursor.fetchall()
         conn.close()
         return projects
     
     @staticmethod
-    def create_project(user_id, project_name, description=None):
+    def create_project(created_by, project_name, description=None, role="owner"):
         conn = get_db_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("INSERT INTO projects (user_id, project_name, description) VALUES (?, ?, ?)",
-                          (user_id, project_name, description))
+            cursor.execute("INSERT INTO projects (project_name, description, created_by) VALUES (?, ?, ?)",
+                          (project_name, description, created_by))
             project_id = cursor.lastrowid
+            cursor.execute("INSERT INTO project_users (project_id, user_id, role) VALUES (?, ?, ?)",
+                          (project_id, created_by, role))
             conn.commit()
-            print(f"Project '{project_name}' created successfully for user_id {user_id}")
+            print(f"Project '{project_name}' created by user_id {created_by} as {role}")
             return project_id
         except sqlite3.IntegrityError as e:
             print(f"Project creation failed for '{project_name}': {e}")
             return None
+        finally:
+            conn.close()
+    
+    @staticmethod
+    def assign_user_to_project(project_id, user_id, role="viewer"):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO project_users (project_id, user_id, role) VALUES (?, ?, ?)",
+                          (project_id, user_id, role))
+            conn.commit()
+            print(f"User {user_id} assigned to project {project_id} as {role}")
+            return True
+        except sqlite3.IntegrityError as e:
+            print(f"Assignment failed (user may already be assigned): {e}")
+            return False
         finally:
             conn.close()
     
@@ -276,7 +309,6 @@ class AppDatabase:
             print("Missing required data for QA pair")
             return False
 
-        # Normalize data
         try:
             project_id = int(project_id)
         except (ValueError, TypeError):
@@ -288,10 +320,6 @@ class AppDatabase:
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        cursor.execute("PRAGMA foreign_keys")
-        fk_status = cursor.fetchone()[0]
-        print(f"Foreign keys status: {'ON' if fk_status else 'OFF'}")
         
         try:
             cursor.execute("SELECT project_id FROM projects WHERE project_id = ?", (project_id,))
@@ -308,21 +336,17 @@ class AppDatabase:
                     print(f"Warning: Call ID {call_id} does not exist for project {project_id}")
                     call_id = None
 
-            print("About to execute INSERT statement")
             if call_id is None:
-                print("Executing with NULL call_id")
                 cursor.execute("""
-                INSERT INTO qa_pairs (project_id, call_id, question, answer) 
-                VALUES (?, NULL, ?, ?)
+                INSERT INTO qa_pairs (project_id, call_id, question, answer, is_trained) 
+                VALUES (?, NULL, ?, ?, 0)
                 """, (project_id, question.strip(), answer.strip()))
             else:
-                print(f"Executing with call_id: {call_id}")
                 cursor.execute("""
-                INSERT INTO qa_pairs (project_id, call_id, question, answer) 
-                VALUES (?, ?, ?, ?)
+                INSERT INTO qa_pairs (project_id, call_id, question, answer, is_trained) 
+                VALUES (?, ?, ?, ?, 0)
                 """, (project_id, call_id, question.strip(), answer.strip()))
                 
-            print("About to commit transaction")
             conn.commit()
             print(f"QA pair stored successfully for project_id {project_id}, call_id {call_id}")
             return True
@@ -333,15 +357,13 @@ class AppDatabase:
             return False
         except Exception as e:
             print(f"Unexpected error storing QA pair: {str(e)}")
-            print(f"Error type: {type(e).__name__}")
             conn.rollback()
             return False
         finally:
             conn.close()
 
     @staticmethod
-    def store_qa_temp(project_id, question, answer, source_type, source_id=None, metadata=None):
-        """Store a QA pair in the qa_temp table."""
+    def store_qa_temp(project_id, question, answer, source_type, source_id=None):
         if not project_id or not question or not answer or not source_type:
             print("Missing required data for QA temp pair")
             return False
@@ -363,9 +385,9 @@ class AppDatabase:
                 return False
 
             cursor.execute("""
-            INSERT INTO qa_temp (project_id, question, answer, source_type, source_id, metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """, (project_id, question.strip(), answer.strip(), source_type, source_id, metadata))
+            INSERT INTO qa_temp (project_id, question, answer, source_type, source_id)
+            VALUES (?, ?, ?, ?, ?)
+            """, (project_id, question.strip(), answer.strip(), source_type, source_id))
             
             conn.commit()
             print(f"QA temp pair stored successfully for project_id {project_id}")
@@ -384,12 +406,11 @@ class AppDatabase:
 
     @staticmethod
     def get_project_qa_temp(project_id):
-        """Retrieve all QA pairs from qa_temp for a project."""
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-        SELECT id, question, answer, source_type, source_id, is_trained, is_reviewed, 
-               similarity_score, similar_qa_id, metadata, created_at 
+        SELECT id, question, answer, source_type, source_id, is_reviewed, 
+               similarity_score, similar_qa_id, created_at 
         FROM qa_temp WHERE project_id = ?
         """, (project_id,))
         qa_temp_pairs = cursor.fetchall()
@@ -397,9 +418,8 @@ class AppDatabase:
         return qa_temp_pairs
 
     @staticmethod
-    def store_model(project_id, dataset_id, model_name, model_path, model_type, version=None, qa_temp_ids=None):
-        """Store a trained model in the models table."""
-        if not project_id or not dataset_id or not model_name or not model_path or not model_type:
+    def store_model(project_id, dataset_id, model_name, model_path, version=None, qa_pairs_id=None):
+        if not project_id or not dataset_id or not model_name or not model_path:
             print("Missing required data for model")
             return False
 
@@ -426,9 +446,9 @@ class AppDatabase:
                 return False
 
             cursor.execute("""
-            INSERT INTO models (project_id, dataset_id, model_name, model_path, model_type, version, qa_temp_ids)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (project_id, dataset_id, model_name, model_path, model_type, version, qa_temp_ids))
+            INSERT INTO models (project_id, dataset_id, model_name, model_path, version, qa_pairs_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """, (project_id, dataset_id, model_name, model_path, version, qa_pairs_id))
             
             conn.commit()
             print(f"Model '{model_name}' stored successfully for project_id {project_id}")
@@ -447,11 +467,10 @@ class AppDatabase:
 
     @staticmethod
     def get_project_models(project_id):
-        """Retrieve all models for a project."""
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-        SELECT model_id, dataset_id, model_name, model_path, model_type, version, qa_temp_ids, trained_at
+        SELECT model_id, dataset_id, model_name, model_path, version, qa_pairs_id, trained_at
         FROM models WHERE project_id = ?
         """, (project_id,))
         models = cursor.fetchall()
@@ -513,6 +532,97 @@ class AppDatabase:
         return calls
     
     @staticmethod
+    def rename_project(project_id, new_name):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE projects SET project_name = ? WHERE project_id = ?", (new_name, project_id))
+            if cursor.rowcount > 0:
+                conn.commit()
+                print(f"Project ID {project_id} renamed to '{new_name}'")
+                return True
+            else:
+                print(f"Project ID {project_id} not found")
+                return False
+        except sqlite3.IntegrityError as e:
+            print(f"Failed to rename project ID {project_id}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    @staticmethod
+    def delete_project(project_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            # delete all related data first
+            # cursor.execute("DELETE FROM project_users WHERE project_id = ?", (project_id,))
+            # cursor.execute("DELETE FROM calls WHERE project_id = ?", (project_id,))
+            # cursor.execute("DELETE FROM documents WHERE project_id = ?", (project_id,))
+            # cursor.execute("DELETE FROM utterances WHERE project_id = ?", (project_id,))
+            # cursor.execute("DELETE FROM qa_pairs WHERE project_id = ?", (project_id,))
+            # cursor.execute("DELETE FROM qa_temp WHERE project_id = ?", (project_id,))
+            # cursor.execute("DELETE FROM datasets WHERE project_id = ?", (project_id,))
+            # cursor.execute("DELETE FROM models WHERE project_id = ?", (project_id,))
+
+            # delete the project
+            cursor.execute("DELETE FROM projects WHERE project_id = ?", (project_id,))
+            if cursor.rowcount > 0:
+                conn.commit()
+                print(f"Project ID {project_id} deleted successfully")
+                return True
+            else:
+                print(f"Project ID {project_id} not found")
+                return False
+        except Exception as e:
+            print(f"Failed to delete project ID {project_id}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_all_usernames():
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT username FROM users")
+        usernames = [row["username"] for row in cursor.fetchall()]
+        conn.close()
+        return usernames
+
+    @staticmethod
+    def remove_user_from_project(project_id, user_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM project_users WHERE project_id = ? AND user_id = ?", (project_id, user_id))
+            if cursor.rowcount > 0:
+                conn.commit()
+                print(f"User ID {user_id} removed from project ID {project_id}")
+                return True
+            else:
+                print(f"User ID {user_id} not found in project ID {project_id}")
+                return False
+        except Exception as e:
+            print(f"Failed to remove user ID {user_id} from project ID {project_id}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_project_users(project_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT pu.user_id, u.username, pu.role 
+            FROM project_users pu 
+            JOIN users u ON pu.user_id = u.user_id 
+            WHERE pu.project_id = ?
+        """, (project_id,))
+        users = cursor.fetchall()
+        conn.close()
+        return [{"user_id": u["user_id"], "username": u["username"], "role": u["role"]} for u in users]
+
+    @staticmethod
     def remove_call(project_id, call_id):
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -551,12 +661,33 @@ class AppDatabase:
     def get_project_qa_pairs(project_id):
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, call_id, question, answer, created_at FROM qa_pairs WHERE project_id = ?",
-                      (project_id,))
+        cursor.execute("""
+        SELECT id, call_id, question, answer, is_trained, created_at 
+        FROM qa_pairs WHERE project_id = ?
+        """, (project_id,))
         qa_pairs = cursor.fetchall()
         conn.close()
         return qa_pairs
-    
+
+    @staticmethod
+    def remove_qa_temp(project_id, qa_id):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM qa_temp WHERE project_id = ? AND id = ?", (project_id, qa_id))
+            if cursor.rowcount > 0:
+                conn.commit()
+                print(f"QA temp pair {qa_id} removed from project_id {project_id}")
+                return True
+            else:
+                print(f"QA temp pair {qa_id} not found in project_id {project_id}")
+                return False
+        except Exception as e:
+            print(f"Failed to remove QA temp pair {qa_id}: {e}")
+            return False
+        finally:
+            conn.close()
+
     @staticmethod
     def remove_qa_pair(project_id, qa_id):
         conn = get_db_connection()
