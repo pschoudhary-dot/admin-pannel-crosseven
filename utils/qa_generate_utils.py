@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from utils.db import AppDatabase
+import time
 from utils.qa_utils import (
     generate_qa_from_transcript, 
     generate_qa_from_document_chunk, 
@@ -14,6 +15,12 @@ import time
 
 def save_and_review_qa_pairs(project_id, qa_pairs, source_type, source_id):
     """Save QA pairs to temporary storage with similarity scoring and provide review interface."""
+
+    # First, verify we have content to process
+    if not qa_pairs:
+        st.warning("No QA pairs to save.")
+        return False
+    
     # Calculate similarity scores for all QA pairs
     enhanced_qa_pairs = calculate_qa_similarities(project_id, qa_pairs)
     
@@ -23,6 +30,9 @@ def save_and_review_qa_pairs(project_id, qa_pairs, source_type, source_id):
         # Extract similarity data
         similarity_score = qa.get('similarity_score', 0.0)
         similar_qa_id = qa.get('similar_qa_id', None)
+        
+        # Print debug info
+        print(f"Storing QA: {qa['question'][:30]}... | Similarity: {similarity_score:.2f} | Similar ID: {similar_qa_id}")
         
         # Store in database with similarity info
         if AppDatabase.store_qa_temp_with_similarity(
@@ -44,8 +54,10 @@ def display_review_interface(project_id, source_type, source_id=None):
     """Display and manage QA pairs in temporary storage with similarity information."""
     temp_qa_pairs = AppDatabase.get_project_qa_temp(project_id)
     
+    # Convert sqlite3.Row objects to dictionaries first
     temp_qa_pairs = [dict(qa) for qa in temp_qa_pairs]
     
+    # Filter based on source and ID
     if source_id:
         temp_qa_pairs = [qa for qa in temp_qa_pairs if qa['source_id'] == source_id and qa['source_type'] == source_type]
     else:
@@ -57,34 +69,71 @@ def display_review_interface(project_id, source_type, source_id=None):
 
     st.subheader("Review and Select QA Pairs")
     
-    qa_df = pd.DataFrame([{
-        "Select": True,
-        "Question": qa["question"],
-        "Answer": qa["answer"],
-        "Source ID": qa["source_id"],
-        "Similarity": f"{qa['similarity_score']:.2f}" if qa['similarity_score'] is not None else "N/A",
-        "Similar QA": qa["similar_qa_id"] if qa["similar_qa_id"] is not None else "None",
-        "ID": qa["id"]
-    } for qa in temp_qa_pairs])
+    # Create a dataframe with styling for similarity levels
+    qa_rows = []
+    for qa in temp_qa_pairs:
+        similarity = qa.get('similarity_score', 0.0)
+        if similarity is None:
+            similarity = 0.0
+            
+        # Format similarity display value
+        similarity_display = f"{similarity:.2f}" if similarity != 0.0 else "N/A"
+        
+        # Determine row styling
+        style = ""
+        if similarity >= 0.9:
+            style = "background-color: rgba(255, 0, 0, 0.2);"  # Red for high similarity
+        elif similarity >= 0.7:
+            style = "background-color: rgba(255, 255, 0, 0.2);"  # Yellow for medium similarity
+        elif similarity >= 0.3:
+            style = "background-color: rgba(0, 255, 0, 0.1);"  # Light green for low similarity
+            
+        qa_rows.append({
+            "Select": True,
+            "Question": qa["question"],
+            "Answer": qa["answer"],
+            "Source ID": qa["source_id"] or "N/A",
+            "Similarity": similarity_display,
+            "Similar QA": qa["similar_qa_id"] if qa["similar_qa_id"] is not None else "None",
+            "ID": qa["id"],
+            "_style": style
+        })
     
-    # Display the enhanced dataframe
+    # Create the dataframe
+    qa_df = pd.DataFrame(qa_rows)
+    
+    # Display the legend for similarity scores
     st.write("QA pairs with similarity scores:")
-    st.write("🔴 Red highlighting indicates potentially duplicate questions (similarity ≥ 0.9)")
-    st.write("🟡 Yellow highlighting indicates similar questions (similarity ≥ 0.85)")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("🔴 **Red**: High similarity (≥ 0.9)")
+    with col2:
+        st.markdown("🟡 **Yellow**: Mid similarity (≥ 0.7)")
+    with col3:
+        st.markdown("🟢 **Green**: Low similarity (≥ 0.3)")
+        
     
+    # Create the data editor
     edited_df = st.data_editor(
-        qa_df,
+        qa_df.drop(columns=['_style']),  # Remove the style column
         hide_index=True,
         use_container_width=True,
         column_config={
             "Similarity": st.column_config.NumberColumn(
                 "Similarity Score",
-                format="%.2f",
                 help="How similar this question is to existing QA pairs"
             ),
             "Similar QA": st.column_config.TextColumn(
                 "Similar QA ID",
                 help="ID of the most similar existing question"
+            ),
+            "Question": st.column_config.TextColumn(
+                "Question",
+                width="large"
+            ),
+            "Answer": st.column_config.TextColumn(
+                "Answer",
+                width="large"
             )
         }
     )
@@ -130,8 +179,7 @@ def display_review_interface(project_id, source_type, source_id=None):
                     # If we already have a similar question in our kept set, remove this one
                     keep_this = True
                     for kept_q in kept_questions:
-                        if qa["question"] == kept_q:
-                            # Exact duplicate - remove
+                        if qa["question"] == kept_q or calculate_qa_similarities(qa["question"], kept_q) >= similarity_threshold:
                             AppDatabase.remove_qa_temp(project_id, qa["id"])
                             removed_count += 1
                             keep_this = False
@@ -148,15 +196,16 @@ def display_review_interface(project_id, source_type, source_id=None):
                 st.info("No duplicate QA pairs found.")
                 
     # If similarities exist, show a more detailed view
-    if any(qa.get('similarity_score', 0) and qa.get('similarity_score', 0) > 0.8 for qa in temp_qa_pairs):
+    similar_pairs = [qa for qa in temp_qa_pairs if qa.get('similarity_score', 0) >= 0.7 and qa.get('similar_qa_id')]
+    if similar_pairs:
         st.subheader("Similar Question Analysis")
         st.write("The following questions have similar existing questions in the main QA database:")
         
-        for qa in temp_qa_pairs:
+        for qa in similar_pairs:
             similarity_score = qa.get('similarity_score')
             similar_qa_id = qa.get('similar_qa_id')
             
-            if similarity_score and similarity_score > 0.8 and similar_qa_id:
+            if similar_qa_id:
                 similar_qa = AppDatabase.get_qa_pair_by_id(project_id, similar_qa_id)
                 if similar_qa:
                     # Convert to dict if needed

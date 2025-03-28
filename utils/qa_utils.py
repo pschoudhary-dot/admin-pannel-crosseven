@@ -551,10 +551,8 @@ def check_duplicate_qa(project_id, question, existing_qa_pairs=None):
 
 def normalize_text(text):
     """Normalize text for similarity comparison."""
-    # Convert to lowercase and remove punctuation
     text = text.lower()
     text = re.sub(r'[^\w\s]', '', text)
-    # Remove extra whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
@@ -601,24 +599,39 @@ def calculate_qa_similarities(project_id, new_qa_pairs):
         print("No existing QA pairs to compare against")
         return new_qa_pairs
     
+    # Convert sqlite3.Row objects to dictionaries if needed
+    if not isinstance(existing_qa_pairs[0], dict):
+        existing_qa_pairs = [dict(qa) for qa in existing_qa_pairs]
+    
     # Process each new QA pair
     for qa in new_qa_pairs:
-        # Find similar existing questions
-        similar_qa = find_similar_question(qa['question'], existing_qa_pairs)
-        
-        if similar_qa:
-            # Add similarity information to the QA pair
-            qa['similarity_score'] = similar_qa.get('similarity_score', 0.0)
-            qa['similar_qa_id'] = similar_qa['id']
-            print(f"Found similar question (score: {qa['similarity_score']:.2f}): {similar_qa['question']}")
-        else:
-            # No similar question found
+        # Skip if no question to compare
+        if not qa.get('question'):
             qa['similarity_score'] = 0.0
             qa['similar_qa_id'] = None
+            continue
+            
+        # Find similar existing questions
+        max_similarity = 0.0
+        most_similar_qa = None
+        
+        for existing_qa in existing_qa_pairs:
+            # Calculate similarity between questions
+            from utils.qa_utils import calculate_text_similarity
+            similarity = calculate_text_similarity(qa['question'], existing_qa['question'])
+            
+            # Update if this is the most similar so far
+            if similarity > max_similarity:
+                max_similarity = similarity
+                most_similar_qa = existing_qa
+        
+        # Add similarity information to the QA pair
+        qa['similarity_score'] = max_similarity if max_similarity >= 0.3 else 0.0
+        qa['similar_qa_id'] = most_similar_qa['id'] if max_similarity >= 0.3 and most_similar_qa else None
+        
+        print(f"Question: {qa['question'][:30]}... | Similarity: {qa['similarity_score']:.2f} | Similar ID: {qa['similar_qa_id']}")
     
     return new_qa_pairs
-
-    # Add these functions to qa_utils.py
 
 def calculate_text_similarity(text1, text2):
     """Calculate cosine similarity between two texts using TF-IDF."""
